@@ -38,20 +38,11 @@
 #include <controller_interface/controller_interface.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 
-// #include <franka/model.h>
-// #include <franka/robot.h>
-// #include <franka/robot_state.h>
-
-// #include "franka_hardware/franka_hardware_interface.hpp"
-// #include <franka_hardware/model.hpp>
-
 #include "franka_msgs/msg/franka_robot_state.hpp"
 #include "franka_msgs/msg/errors.hpp"
 #include "messages_fr3/srv/set_pose.hpp"
+#include "messages_fr3/msg/closest_point.hpp"
 #include <std_msgs/msg/string.hpp>
-
-// #include "franka_semantic_components/franka_robot_model.hpp"
-// #include "franka_semantic_components/franka_robot_state.hpp"
 
 #include <pinocchio/parsers/urdf.hpp>
 #include <pinocchio/algorithm/kinematics.hpp>
@@ -88,8 +79,8 @@ public:
   controller_interface::CallbackReturn on_deactivate(
       const rclcpp_lifecycle::State& previous_state) override;
 
-    void setPose(const std::shared_ptr<messages_fr3::srv::SetPose::Request> request, 
-    std::shared_ptr<messages_fr3::srv::SetPose::Response> response);
+  void setPose(const std::shared_ptr<messages_fr3::srv::SetPose::Request> request, 
+               std::shared_ptr<messages_fr3::srv::SetPose::Response> response);
       
 
  private:
@@ -97,11 +88,12 @@ public:
     //robot description
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr robot_description_sub_;
     std::promise<std::string> robot_description_promise_;
-    //rclcpp::Subscription<franka_msgs::msg::FrankaRobotState>::SharedPtr franka_state_subscriber = nullptr;
     rclcpp::Service<messages_fr3::srv::SetPose>::SharedPtr pose_srv_;
+    
     const int num_joints = 7;
     const std::string robot_name_{"fr3"};
     const std::string state_interface_name_{"robot_state"};
+    
     //Functions
     void topic_callback(const std::shared_ptr<franka_msgs::msg::FrankaRobotState> msg);
     void updateJointStates();
@@ -110,6 +102,12 @@ public:
     void arrayToMatrix(const std::array<double, 7>& inputArray, Eigen::Matrix<double, 7, 1>& resultMatrix);
     Eigen::Matrix<double, 7, 1> saturateTorqueRate(const Eigen::Matrix<double, 7, 1>& tau_d_calculated, const Eigen::Matrix<double, 7, 1>& tau_J_d);  
     std::array<double, 6> convertToStdArray(const geometry_msgs::msg::WrenchStamped& wrench);
+    
+    // Potential field functions - matching RMP structure exactly
+    void closestPointCallback(const messages_fr3::msg::ClosestPoint::SharedPtr msg);
+    Eigen::Vector3d computeRepulsionForceForSingleObstacle(const Eigen::Vector3d& d_obs);
+    Eigen::VectorXd computeEnvironmentalRepulsionTorques();
+    
     //State vectors and matrices
     std::array<double, 7> q_subscribed;
     std::array<double, 7> tau_J_d = {0,0,0,0,0,0,0};
@@ -127,12 +125,9 @@ public:
     //Robot parameters
     const std::string k_robot_state_interface_name{"robot_state"};
     const std::string k_robot_model_interface_name{"robot_model"};
-    // franka_hardware::FrankaHardwareInterface interfaceClass;
     
-    // The URDF (Unified Robot Description Format) file describes the robot's structure, including its links, joints, and physical properties.
     pinocchio::Model model_;
     pinocchio::Data data_;
-    // std::string urdf_path_ = "/home/matteo/franka_ros2_ws/src/franka_description/robots/fr3/fr3.urdf"; // Path to your robot's URDF file
     int end_effector_frame_id_; // Frame ID for the end-effector
 
     const double delta_tau_max_{1.0};
@@ -142,9 +137,9 @@ public:
     Eigen::Matrix<double, 6, 6> Lambda = IDENTITY;                                           // operational space mass matrix
     Eigen::Matrix<double, 6, 6> Sm = IDENTITY;                                               // task space selection matrix for positions and rotation
     Eigen::Matrix<double, 6, 6> Sf = Eigen::MatrixXd::Zero(6, 6);                            // task space selection matrix for forces
-    Eigen::Matrix<double, 6, 6> K =  (Eigen::MatrixXd(6,6) << 2500,   0,   0,   0,   0,   0,
-                                                                0, 2500,   0,   0,   0,   0,
-                                                                0,   0, 2500,   0,   0,   0,  // impedance stiffness term
+    Eigen::Matrix<double, 6, 6> K =  (Eigen::MatrixXd(6,6) << 350,   0,   0,   0,   0,   0,
+                                                                0, 350,   0,   0,   0,   0,
+                                                                0,   0, 350,   0,   0,   0,  // impedance stiffness term
                                                                 0,   0,   0, 130,   0,   0,
                                                                 0,   0,   0,   0, 130,   0,
                                                                 0,   0,   0,   0,   0,  10).finished();
@@ -164,9 +159,9 @@ public:
                                                                    0,   0,   0,   0,   1,   0,
                                                                    0,   0,   0,   0,   0,   2.5).finished();                                               // impedance inertia term
 
-    Eigen::Matrix<double, 6, 6> cartesian_stiffness_target_;                                 // impedance damping term
-    Eigen::Matrix<double, 6, 6> cartesian_damping_target_;                                   // impedance damping term
-    Eigen::Matrix<double, 6, 6> cartesian_inertia_target_;                                   // impedance damping term
+    Eigen::Matrix<double, 6, 6> cartesian_stiffness_target_;                                 // impedance stiffness target
+    Eigen::Matrix<double, 6, 6> cartesian_damping_target_;                                   // impedance damping target
+    Eigen::Matrix<double, 6, 6> cartesian_inertia_target_;                                   // impedance inertia target
     Eigen::Vector3d position_d_target_ = {0.5, 0.0, 0.5};
     Eigen::Vector3d rotation_d_target_ = {M_PI, 0.0, 0.0};
     Eigen::Quaterniond orientation_d_target_;
@@ -178,6 +173,15 @@ public:
     double nullspace_stiffness_{0.001};
     double nullspace_stiffness_target_{0.001};
     double D_gain = 2.05;
+
+    // Environmental repulsion for potential fields - matching RMP structure
+    rclcpp::Subscription<messages_fr3::msg::ClosestPoint>::SharedPtr closest_point_sub_;
+    std::shared_ptr<messages_fr3::msg::ClosestPoint> closest_point_msg_;
+    std::mutex closest_point_mutex_;
+    
+    double lambda_repulsion_;  // Scaling factor for repulsion force (λ)
+    double Q_threshold_;       // Distance threshold beyond which force is negligible (Q)
+    double l_smoothing_;       // Smoothing exponent (l)
 
     //Logging
     int outcounter = 0;
